@@ -917,7 +917,7 @@ def reconcile_with_whg(place_queries):
 
     return {
         "enabled": True,
-        "note": "" if places else "WHG returned no candidates after focused and fallback reconciliation attempts.",
+        "note": "" if places else "Based on your prompt, WHG returned no candidates.",
         "places": places,
         "profile": profile_used,
         "attribution": payload.get("attribution", {}),
