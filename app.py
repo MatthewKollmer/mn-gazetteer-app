@@ -37,6 +37,8 @@ def read_int_env(name, default):
 MAX_MESSAGE_CHARS = read_int_env("MAX_MESSAGE_CHARS", 4000)
 WHG_TIMEOUT_SECONDS = read_int_env("WHG_TIMEOUT_SECONDS", 12)
 WHG_RESULT_LIMIT = read_int_env("WHG_RESULT_LIMIT", 5)
+GUNICORN_TIMEOUT_SECONDS = read_int_env("GUNICORN_TIMEOUT", 120)
+BROWSER_REQUEST_TIMEOUT_MS = (max(GUNICORN_TIMEOUT_SECONDS, 1) + 10) * 1000
 
 missing_settings = []
 for setting_name in ("OPENAI_API_KEY", "MINNESOTA_VECTOR_STORE_ID"):
@@ -283,6 +285,24 @@ INDEX_HTML = """
       font-weight: 760;
     }
 
+    .place-name a {
+      color: var(--green);
+      text-decoration-color: rgba(33, 76, 63, 0.42);
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+    }
+
+    .place-name a:hover {
+      color: var(--berry);
+      text-decoration-color: currentColor;
+    }
+
+    .place-name a:focus-visible {
+      border-radius: 3px;
+      outline: 3px solid rgba(45, 125, 135, 0.22);
+      outline-offset: 2px;
+    }
+
     .place-detail {
       margin-top: 3px;
       color: var(--muted);
@@ -340,7 +360,7 @@ INDEX_HTML = """
             <p class="panel-title">Query</p>
           </div>
           <form data-form>
-            <textarea data-message spellcheck="true">Tell me about Mankato in the 1850s.</textarea>
+            <textarea data-message spellcheck="true">Let's discuss anything about or related to Minnesota.</textarea>
             <div class="actions">
               <span class="meta" data-counter>0 characters</span>
               <button class="submit" type="submit" data-submit>Ask</button>
@@ -350,7 +370,7 @@ INDEX_HTML = """
 
         <section class="panel">
           <div class="panel-header">
-            <p class="panel-title">WHG Candidates</p>
+            <p class="panel-title">WHG Candidates (approximate)</p>
           </div>
           <div class="place-list" data-places>
             <div class="meta">No query yet.</div>
@@ -375,6 +395,8 @@ INDEX_HTML = """
     const statusLabel = document.querySelector("[data-status] span:last-child");
     const submit = document.querySelector("[data-submit]");
     const counter = document.querySelector("[data-counter]");
+    const requestTimeoutMs = {{ request_timeout_ms }};
+    const timeoutMessage = "This request took longer than the server allows and timed out. More complicated questions can require more processing time. Please try again or ask about fewer named places at once.";
 
     function setStatus(text) {
       statusLabel.textContent = text;
@@ -409,7 +431,20 @@ INDEX_HTML = """
 
         const name = document.createElement("div");
         name.className = "place-name";
-        name.textContent = item.name || "Unnamed place";
+        const nameText = item.name || "Unnamed place";
+
+        if (item.record_url) {
+          const link = document.createElement("a");
+          link.href = item.record_url;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          link.title = "Open this candidate record in a new tab";
+          link.textContent = nameText;
+          name.appendChild(link);
+        } else {
+          name.textContent = nameText;
+        }
+
         wrapper.appendChild(name);
 
         const detail = document.createElement("div");
@@ -447,13 +482,19 @@ INDEX_HTML = """
 
       submit.disabled = true;
       answer.className = "answer empty";
-      answer.textContent = "Working...";
+      answer.textContent = "Working... This may take as long as 2 minutes.";
       setStatus("Retrieving");
       renderPlaces([], "");
+
+      const requestController = new AbortController();
+      const requestTimeout = window.setTimeout(function() {
+        requestController.abort();
+      }, requestTimeoutMs);
 
       try {
         const response = await fetch("/api/gazetteer", {
           method: "POST",
+          signal: requestController.signal,
           headers: {
             "Content-Type": "application/json"
           },
@@ -462,7 +503,21 @@ INDEX_HTML = """
           })
         });
 
-        const payload = await response.json();
+        const contentType = response.headers.get("content-type") || "";
+        const responseText = await response.text();
+        let payload = {};
+
+        if (contentType.includes("application/json")) {
+          try {
+            payload = JSON.parse(responseText);
+          } catch (parseError) {
+            throw new Error("The server returned an invalid JSON response.");
+          }
+        } else if (response.status >= 500) {
+          throw new Error(timeoutMessage);
+        } else {
+          throw new Error("The server returned an unexpected response (HTTP " + response.status + ").");
+        }
 
         if (!response.ok) {
           const errorText = payload.error || "Unable to generate a response.";
@@ -475,9 +530,14 @@ INDEX_HTML = """
         setStatus("Ready");
       } catch (error) {
         answer.className = "answer error";
-        answer.textContent = error.message;
+        if (error.name === "AbortError") {
+          answer.textContent = timeoutMessage;
+        } else {
+          answer.textContent = error.message || "Unable to complete the request.";
+        }
         setStatus("Error");
       } finally {
+        window.clearTimeout(requestTimeout);
         submit.disabled = false;
       }
     }
@@ -581,18 +641,77 @@ def normalize_alt_names(value):
     return names
 
 
+def build_candidate_record_url(entity_id, namespace):
+    if not isinstance(entity_id, str):
+        return ""
+
+    parts = entity_id.split(":")
+    if not parts or parts[0] != "place":
+        return ""
+
+    source = (namespace or "").lower()
+    identifier = ""
+    if len(parts) == 2:
+        if source and source != "whg":
+            return ""
+        source = "whg"
+        identifier = parts[1]
+    elif len(parts) == 3:
+        id_source = parts[1].lower()
+        if source and source != id_source:
+            return ""
+        source = id_source
+        identifier = parts[2]
+    else:
+        return ""
+
+    if source == "whg" and identifier.isdigit():
+        return f"https://whgazetteer.org/places/{identifier}/portal/"
+
+    if source == "gn" and identifier.isdigit():
+        return f"https://www.geonames.org/{identifier}/"
+
+    if source == "tgn" and identifier.isdigit():
+        return f"https://vocab.getty.edu/page/tgn/{identifier}"
+
+    if source == "wd" and re.fullmatch(r"Q\d+", identifier):
+        return f"https://www.wikidata.org/wiki/{identifier}"
+
+    if source in ("osm", "ohm"):
+        osm_match = re.fullmatch(r"([nwr])(\d+)", identifier)
+        if osm_match:
+            object_types = {
+                "n": "node",
+                "w": "way",
+                "r": "relation",
+            }
+            object_type = object_types.get(osm_match.group(1))
+            object_id = osm_match.group(2)
+            if source == "osm":
+                return f"https://www.openstreetmap.org/{object_type}/{object_id}"
+            return f"https://www.openhistoricalmap.org/{object_type}/{object_id}"
+
+    if source == "pl" and re.fullmatch(r"[A-Za-z0-9._-]+", identifier):
+        return f"https://pleiades.stoa.org/places/{identifier}"
+
+    return ""
+
+
 def normalize_whg_candidate(query_text, candidate):
     alt_names = normalize_alt_names(candidate.get("alt_names"))
+    entity_id = candidate.get("id")
+    namespace = candidate.get("namespace")
     normalized = {
         "query": query_text,
-        "id": candidate.get("id"),
+        "id": entity_id,
         "name": candidate.get("name"),
         "score": candidate.get("score"),
         "match": candidate.get("match"),
         "description": candidate.get("description"),
-        "namespace": candidate.get("namespace"),
+        "namespace": namespace,
         "has_geom": candidate.get("has_geom"),
         "alt_names": alt_names,
+        "record_url": build_candidate_record_url(entity_id, namespace),
     }
     return normalized
 
@@ -884,7 +1003,10 @@ def extract_file_citations(response):
 
 @app.route("/", methods=["GET"])
 def index():
-    return render_template_string(INDEX_HTML)
+    return render_template_string(
+        INDEX_HTML,
+        request_timeout_ms=BROWSER_REQUEST_TIMEOUT_MS,
+    )
 
 
 @app.route("/health", methods=["GET"])

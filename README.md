@@ -44,7 +44,7 @@ curl -X POST http://127.0.0.1:5000/api/gazetteer \
 
 ## Deployment Notes
 
-The app reads `PORT`, `OPENAI_MODEL`, `MAX_MESSAGE_CHARS`, `WHG_TIMEOUT_SECONDS`, and `FLASK_DEBUG` from the environment. For Render, Railway, Fly, or a similar host, set the same environment variables there and use:
+The app reads `PORT`, `OPENAI_MODEL`, `MAX_MESSAGE_CHARS`, `WHG_TIMEOUT_SECONDS`, `GUNICORN_TIMEOUT`, and `FLASK_DEBUG` from the environment. `GUNICORN_TIMEOUT` defaults to 120 seconds so longer multi-place requests can finish. For Render, Railway, Fly, or a similar host, set the same environment variables there and use:
 
 ```bash
 gunicorn -c gunicorn_config.py app:app
