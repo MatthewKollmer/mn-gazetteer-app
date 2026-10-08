@@ -1,6 +1,10 @@
 # Minnesota Gazetteer App
 
-A small Flask web app backed by the OpenAI Responses API, your Minnesota vector store, and optional World Historical Gazetteer place reconciliation.
+A small Flask web app backed by the OpenAI Responses API, my Minnesota/semantic layer vector store, and the World Historical Gazetteer place reconciliation.
+
+This is just an early prototype. More details about this project will be added soon.
+
+This prototype has been configured in part using Codex.
 
 ## Local Setup
 
